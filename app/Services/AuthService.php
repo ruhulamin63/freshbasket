@@ -27,7 +27,7 @@ class AuthService
     /** @param array{email: string, password: string} $credentials */
     public function login(array $credentials): string
     {
-        $token = $this->guard()->attempt($credentials);
+        $token = $this->guard()->attempt([...$credentials, 'is_active' => true]);
 
         if (! $token) {
             throw ValidationException::withMessages(['email' => ['The supplied credentials are invalid.']]);

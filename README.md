@@ -4,10 +4,10 @@ FreshBasket is a Laravel 12 take-home implementation of a grocery catalogue, inv
 
 ## Technical profile
 
-- PHP 8.3, Laravel 12
+- PHP 8.2+ (tested on PHP 8.3), Laravel 12
 - `tymon/jwt-auth` 2.3
 - `spatie/laravel-permission` 6.x using the `api` guard
-- MySQL 8.4 as the production source of truth
+- MySQL 8+ as the production source of truth
 - Redis for versioned catalogue page caching
 - PHPUnit feature tests; SQLite in memory for fast automated tests
 - Dependency-free Blade/CSS/JavaScript frontend using `fetch`
@@ -18,7 +18,7 @@ Money is stored and calculated as integer minor units (`*_cents`). No frontend p
 
 ### Local PHP + MySQL
 
-Requirements: PHP 8.3+, Composer 2, MySQL 8+, and Redis (recommended).
+Requirements: PHP 8.2+, Composer 2, MySQL 8+, Redis, and the PHP extensions required by Laravel, MySQL and Redis.
 
 ```bash
 composer install
@@ -29,22 +29,32 @@ php artisan migrate --seed
 php artisan serve
 ```
 
-On PowerShell, use `Copy-Item .env.example .env` instead of `cp`. Before migrating, update the database and Redis values in `.env`. The seeded admin credentials come from `ADMIN_EMAIL` and `ADMIN_PASSWORD`; change the example password before using the application outside local development.
+On PowerShell, use `Copy-Item .env.example .env` instead of `cp`. Before migrating, create the MySQL database and update `DB_*`, `REDIS_*`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD` in `.env`. `php artisan migrate --seed` creates permissions, the configured administrator, and sample groceries. Change the example admin password before using the application outside local development.
 
 The UI is available at `http://127.0.0.1:8000`. No Node build is required because the small Blade client ships as static assets.
+
+To verify the installation:
+
+```bash
+php artisan about
+php artisan migrate:status
+php artisan test
+```
 
 ## Roles and permissions
 
 | Role | Permissions |
 |---|---|
-| `admin` | `groceries.view`, `groceries.create`, `groceries.update`, `groceries.delete`, `inventory.update`, `orders.create`, `orders.view-own` |
+| `admin` | All catalogue, dashboard, order, user, and role-management permissions |
 | `user` | `groceries.view`, `orders.create`, `orders.view-own` |
 
-Registration always assigns only the `user` role. There is no `role_id` column on `users`; Spatie polymorphic tables own role assignments. Admin creation is configuration-driven through `AdminUserSeeder`.
+Registration always assigns only the `user` role. Custom roles can be created from the admin panel with granular permissions. The built-in `admin` and `user` roles are protected, and an in-use custom role cannot be deleted. There is no `role_id` column on `users`; Spatie polymorphic tables own role assignments. Admin creation is configuration-driven through `AdminUserSeeder`.
 
 ### Admin panel
 
-Signing in with an account that has the `admin` role automatically opens the responsive Admin Panel. It supports server-side search, active/inactive filtering, pagination, product creation and editing, soft deletion, and a separately authorized absolute stock update. Admins can switch to a read-only Storefront preview; customer ordering controls are not exposed in that view. The UI role check controls presentation only—the `/api/v1/admin/*` routes remain protected by JWT role and permission middleware.
+Signing in with any account that has an admin-panel permission automatically opens the responsive sidebar workspace. It includes an overview, catalogue and stock tools, order search/status workflow, user creation and activation controls, and custom role/permission management. The system prevents self-lockout, removal of the final active administrator, editing built-in roles, and deletion of roles that still have users. Inactive accounts cannot sign in or continue using an existing token. Admins can also switch to the Storefront preview. UI visibility is permission-aware, while every `/api/v1/admin/*` action remains independently protected by JWT and permission middleware.
+
+Sidebar and button visibility are a user-experience aid, not the security boundary. JWT authentication, active-account enforcement, and Spatie permissions are applied to the routes through middleware. Controllers contain no hard-coded role checks, so direct API requests receive the same authorization enforcement as the UI.
 
 ## API
 
@@ -105,13 +115,48 @@ Checkout body contains only identifiers and quantities:
 
 Catalogue writes accept `unit_price_cents`; stock replacement uses `{ "stock_quantity": 20 }`. General product update prohibits `stock_quantity`, keeping inventory behind its separately authorized endpoint.
 
+### Admin operations and access control
+
+| Method | Endpoint | Permission | Purpose |
+|---|---|---|---|
+| GET | `/admin/dashboard` | `dashboard.view` | Metrics, recent orders, and low-stock items |
+| GET | `/admin/orders?search=&status=&date_range=&page=` | `orders.view-all` | Search and filter all orders |
+| GET | `/admin/orders/{id}` | `orders.view-all` | Inspect an order and its item snapshots |
+| PATCH | `/admin/orders/{id}` | `orders.update` | Advance or cancel an order |
+| GET | `/admin/users?search=&role=&is_active=&page=` | `users.view` | Search and filter users |
+| GET | `/admin/users/role-options` | `users.view` | Roles available to user management |
+| POST | `/admin/users` | `users.manage` | Create a user and assign roles |
+| GET | `/admin/users/{id}` | `users.view` | View a managed user |
+| PATCH | `/admin/users/{id}` | `users.manage` | Edit profile, status, password, or roles |
+| GET | `/admin/roles` | `roles.view` | Roles and permission catalogue |
+| POST | `/admin/roles` | `roles.manage` | Create a custom role |
+| PATCH | `/admin/roles/{id}` | `roles.manage` | Rename a custom role or sync permissions |
+| DELETE | `/admin/roles/{id}` | `roles.manage` | Delete an unused custom role |
+
+Order status transitions are `confirmed → processing → completed`; confirmed or processing orders may also be cancelled. Completed and cancelled orders are terminal.
+
+Example role body:
+
+```json
+{
+  "name": "order-manager",
+  "permissions": ["orders.view-all", "orders.update"]
+}
+```
+
+Example order-status body:
+
+```json
+{"status": "processing"}
+```
+
 Successful single resources use `{ "data": {...} }`; paginated resources include Laravel `links` and `meta`. Validation uses HTTP 422, authentication 401, authorization 403, missing resources 404, stock conflicts 409, creation 201, and deletion 204. Domain errors include a stable `error` code.
 
 ## Architecture decisions
 
 ```text
-HTTP → JWT / Spatie middleware → Form Request → Controller
-     → Service → Repository contract → Eloquent / MySQL
+HTTP -> JWT / active-user / Spatie middleware -> Form Request -> Controller
+     -> Service -> Repository contract -> Eloquent / MySQL
 ```
 
 - Controllers only translate HTTP inputs/outputs. Role and permission policy is route middleware, never controller conditionals.
@@ -122,6 +167,16 @@ HTTP → JWT / Spatie middleware → Form Request → Controller
 - Catalogue reads use a cache abstraction with versioned keys and five-minute entries. Catalogue/order writes change the version only after successful commit. Checkout never reads authoritative stock from cache.
 - Query-driven indexes cover active catalogue traversal, grocery name search, user order history, and foreign-key access. Order history eager-loads items to avoid N+1 queries.
 - Database foreign keys, unsigned columns, and MySQL `CHECK` constraints supplement request/domain validation.
+
+### Important business rules
+
+- Registration ignores any supplied role and always assigns `user`; the initial administrator is configuration-seeded.
+- Checkout accepts grocery IDs and quantities only. Prices and totals are recalculated from locked database rows using integer minor units.
+- Multiple grocery rows are locked in deterministic ID order inside a short transaction, preventing overselling and reducing deadlock risk.
+- Stock and catalogue cache versions change only after a successful commit. Cached stock is never authoritative during checkout.
+- A user can only read orders owned by that authenticated user; administrators require explicit all-order permissions.
+- At least one active administrator must remain, and an administrator cannot deactivate or demote themselves.
+- Built-in roles are immutable; custom roles must be unused before deletion.
 
 ## Frontend and localization
 
@@ -135,6 +190,6 @@ php artisan test
 php artisan route:list --except-vendor
 ```
 
-The automated suite covers registration role safety, login/me, token refresh, logout blacklisting, route RBAC, admin inventory separation, database-authoritative totals, snapshot history, transaction rollback, oversell prevention, and own-order isolation.
+The automated suite currently contains 18 tests with 84 assertions. It covers registration role safety, login/me, token refresh, logout blacklisting, inactive-account blocking, middleware RBAC, custom-role lifecycle, last-administrator protection, admin inventory separation, order status transitions, database-authoritative totals, snapshot history, transaction rollback, oversell prevention, and own-order isolation.
 
 For a true parallel-lock integration check, run the checkout suite against MySQL in CI; SQLite is used locally for speed and does not emulate `FOR UPDATE` contention.

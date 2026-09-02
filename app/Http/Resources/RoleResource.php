@@ -2,10 +2,11 @@
 
 namespace App\Http\Resources;
 
+use App\Enums\RoleName;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
-class UserResource extends JsonResource
+class RoleResource extends JsonResource
 {
     /** @return array<string, mixed> */
     public function toArray(Request $request): array
@@ -13,10 +14,9 @@ class UserResource extends JsonResource
         return [
             'id' => $this->id,
             'name' => $this->name,
-            'email' => $this->email,
-            'roles' => $this->getRoleNames()->values(),
-            'permissions' => $this->getAllPermissions()->pluck('name')->values(),
-            'is_active' => $this->is_active,
+            'is_system' => in_array($this->name, array_column(RoleName::cases(), 'value'), true),
+            'users_count' => (int) ($this->users_count ?? 0),
+            'permissions' => $this->permissions->pluck('name')->values(),
         ];
     }
 }
